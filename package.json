@@ -16,7 +16,14 @@
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit"
   },
-  "keywords": ["ai", "agents", "decentralized", "p2p", "monero", "activitypub"],
+  "keywords": [
+    "ai",
+    "agents",
+    "decentralized",
+    "p2p",
+    "monero",
+    "activitypub"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -25,7 +32,9 @@
   "dependencies": {
     "@chainsafe/libp2p-gossipsub": "^14.0.0",
     "@chainsafe/libp2p-noise": "^16.0.0",
+    "@chainsafe/libp2p-yamux": "^8.0.1",
     "@libp2p/bootstrap": "^11.0.0",
+    "@libp2p/identify": "^4.0.10",
     "@libp2p/kad-dht": "^13.0.0",
     "@libp2p/mdns": "^11.0.0",
     "@libp2p/tcp": "^10.0.0",

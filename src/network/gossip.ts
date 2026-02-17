@@ -1,14 +1,13 @@
 /**
- * Network - Gossip Pub/Sub
+ * Network - Gossip Layer
  *
- * Activity record publishing and subscription over gossipsub.
- * Handles message serialization, deduplication, and routing.
+ * Activity record publishing and reception over TCP gossip.
+ * Handles serialization, deduplication, and routing.
  */
 
 import type { NetworkNode, TopicName } from "./node.js";
 import type { ActivityRecord } from "../activity/record.js";
-import { verifyRecord, serializeRecord } from "../activity/record.js";
-import { TOPICS } from "./node.js";
+import { verifyRecord } from "../activity/record.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -27,12 +26,10 @@ interface GossipManager {
 // State
 // ---------------------------------------------------------------------------
 
-// Deduplication: track recently seen record IDs
 const seenRecords = new Map<string, number>();
-const SEEN_TTL_MS = 3600_000; // 1 hour
+const SEEN_TTL_MS = 3600_000;
 const MAX_SEEN = 10_000;
 
-// Handlers per topic
 const topicHandlers = new Map<string, Set<RecordHandler>>();
 
 // ---------------------------------------------------------------------------
@@ -40,24 +37,16 @@ const topicHandlers = new Map<string, Set<RecordHandler>>();
 // ---------------------------------------------------------------------------
 
 export function createGossipManager(node: NetworkNode): GossipManager {
-  const pubsub = node.libp2p.services.pubsub as Record<string, unknown> | undefined;
+  // Handle incoming messages from peers
+  node.onMessage((data: unknown) => {
+    handleIncomingMessage(data);
+  });
 
-  // Set up incoming message handler
-  if (pubsub && "addEventListener" in pubsub) {
-    const ps = pubsub as {
-      addEventListener(event: string, handler: (evt: unknown) => void): void;
-    };
-    ps.addEventListener("message", (evt: unknown) => {
-      handleIncomingMessage(evt);
-    });
-  }
-
-  // Periodic cleanup of seen records
+  // Periodic cleanup
   const cleanupInterval = setInterval(() => {
     pruneSeenRecords();
   }, 60_000);
 
-  // Return cleanup handle so it can be stopped
   const originalStop = node.stop.bind(node);
   node.stop = async () => {
     clearInterval(cleanupInterval);
@@ -65,23 +54,21 @@ export function createGossipManager(node: NetworkNode): GossipManager {
   };
 
   return {
-    async publish(topic: TopicName, record: ActivityRecord): Promise<void> {
-      const bytes = serializeRecord(record);
-
+    async publish(_topic: TopicName, record: ActivityRecord): Promise<void> {
       // Mark as seen so we don't process our own messages
       seenRecords.set(record.id, Date.now());
 
-      if (pubsub && "publish" in pubsub) {
-        const ps = pubsub as {
-          publish(topic: string, data: Uint8Array): Promise<void>;
-        };
-        await ps.publish(topic, bytes);
-        console.log(
-          `[gossip] Published ${record.type} to ${topic} (${bytes.length} bytes)`
-        );
-      } else {
-        console.warn("[gossip] Pubsub not available, record not published");
+      const peers = node.getPeers();
+      if (peers.length === 0) {
+        console.log("[gossip] No peers connected (record stored locally)");
+        return;
       }
+
+      // Broadcast to all connected peers
+      node.broadcast(record);
+      console.log(
+        `[gossip] Published ${record.type} to ${peers.length} peer(s)`
+      );
     },
 
     subscribe(topic: TopicName, handler: RecordHandler): void {
@@ -89,24 +76,11 @@ export function createGossipManager(node: NetworkNode): GossipManager {
         topicHandlers.set(topic, new Set());
       }
       topicHandlers.get(topic)!.add(handler);
-
-      // Subscribe on the pubsub layer if not already
-      if (pubsub && "subscribe" in pubsub) {
-        const ps = pubsub as { subscribe(topic: string): void };
-        ps.subscribe(topic);
-      }
-
-      console.log(`[gossip] Subscribed handler to ${topic}`);
+      console.log(`[gossip] Subscribed to ${topic}`);
     },
 
     unsubscribe(topic: TopicName): void {
       topicHandlers.delete(topic);
-
-      if (pubsub && "unsubscribe" in pubsub) {
-        const ps = pubsub as { unsubscribe(topic: string): void };
-        ps.unsubscribe(topic);
-      }
-
       console.log(`[gossip] Unsubscribed from ${topic}`);
     },
 
@@ -120,26 +94,16 @@ export function createGossipManager(node: NetworkNode): GossipManager {
 // Incoming message processing
 // ---------------------------------------------------------------------------
 
-function handleIncomingMessage(evt: unknown): void {
+function handleIncomingMessage(data: unknown): void {
   try {
-    const event = evt as {
-      detail?: { topic: string; data: Uint8Array };
-    };
-    if (!event.detail) return;
+    const record = data as ActivityRecord;
 
-    const { topic, data } = event.detail;
-
-    // Deserialize the activity record
-    let record: ActivityRecord;
-    try {
-      const text = new TextDecoder().decode(data);
-      record = JSON.parse(text) as ActivityRecord;
-    } catch {
-      console.warn("[gossip] Failed to deserialize incoming message");
+    // Basic validation
+    if (!record || !record.id || !record.type || !record.agent) {
       return;
     }
 
-    // Deduplication check
+    // Deduplication
     if (seenRecords.has(record.id)) {
       return;
     }
@@ -149,9 +113,7 @@ function handleIncomingMessage(evt: unknown): void {
     verifyRecord(record)
       .then((valid) => {
         if (!valid) {
-          console.warn(
-            `[gossip] Invalid signature on record ${record.id.slice(0, 12)}...`
-          );
+          console.warn(`[gossip] Invalid signature on record ${record.id.slice(0, 12)}...`);
           return;
         }
 
@@ -159,46 +121,29 @@ function handleIncomingMessage(evt: unknown): void {
         const now = Math.floor(Date.now() / 1000);
         const drift = Math.abs(now - record.ts);
         if (drift > 3600) {
-          console.warn(
-            `[gossip] Record ${record.id.slice(0, 12)}... has excessive timestamp drift (${drift}s)`
-          );
+          console.warn(`[gossip] Record ${record.id.slice(0, 12)}... has excessive drift (${drift}s)`);
           return;
         }
 
-        // Route to handlers
-        routeRecord(topic, record);
+        // Route to all subscribed handlers
+        routeRecord(record);
       })
       .catch((err) => {
         console.error(`[gossip] Verification error: ${err}`);
       });
   } catch (err) {
-    console.error(`[gossip] Error handling incoming message: ${err}`);
+    console.error(`[gossip] Error handling message: ${err}`);
   }
 }
 
-function routeRecord(topic: string, record: ActivityRecord): void {
-  // Route to topic-specific handlers
-  const handlers = topicHandlers.get(topic);
-  if (handlers) {
+function routeRecord(record: ActivityRecord): void {
+  // Send to all topic handlers (in this simple model, all handlers get all messages)
+  for (const [_topic, handlers] of topicHandlers) {
     for (const handler of handlers) {
       try {
         handler(record);
       } catch (err) {
-        console.error(`[gossip] Handler error on ${topic}: ${err}`);
-      }
-    }
-  }
-
-  // Also route to the activity feed handlers if it's a different topic
-  if (topic !== TOPICS.ACTIVITY) {
-    const activityHandlers = topicHandlers.get(TOPICS.ACTIVITY);
-    if (activityHandlers) {
-      for (const handler of activityHandlers) {
-        try {
-          handler(record);
-        } catch (err) {
-          console.error(`[gossip] Activity handler error: ${err}`);
-        }
+        console.error(`[gossip] Handler error: ${err}`);
       }
     }
   }
@@ -222,7 +167,6 @@ function pruneSeenRecords(): void {
     seenRecords.delete(key);
   }
 
-  // If still too large, remove oldest entries
   if (seenRecords.size > MAX_SEEN) {
     const entries = Array.from(seenRecords.entries())
       .sort((a, b) => a[1] - b[1]);
