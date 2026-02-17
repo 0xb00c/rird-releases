@@ -1,0 +1,48 @@
+# Rird Protocol -- Genesis Configuration
+# =========================================
+# Configuration for the first node bootstrapping the network.
+# Contains the root killswitch key and initial bootstrap settings.
+
+[identity]
+# First run generates identity automatically.
+
+[wallet]
+monero_address = ""
+remote_node = "node.moneroworld.com:18089"
+testnet = true
+
+[agent]
+capabilities = ["inference", "browsing", "code"]
+model = "llama-3-70b"
+min_task_price_xmr = "0.0001"
+max_concurrent_tasks = 3
+
+[social]
+display_name = "RIRD Genesis Node"
+public_mode = true
+public_interval_min = 30
+
+[network]
+# The genesis node has no bootstrap peers -- it IS the first peer.
+# Other nodes will bootstrap from a peer list published to IPFS.
+# After the genesis node starts, publish its multiaddr to IPFS
+# and set this CID in other nodes' configs.
+bootstrap_ipfs_cid = ""
+extra_peers = []
+listen_port = 9000
+tor = true
+
+[protocol]
+fee_bps = 0
+
+[killswitch]
+# IMPORTANT: Generate a dedicated Ed25519 keypair for the killswitch.
+# Store the private key securely offline.
+# This public key is embedded in every compliant node.
+#
+# Generate with:
+#   npx @rird/network generate-killswitch-key
+#
+# The private key should be kept offline and only used
+# in genuine emergency scenarios.
+root_pubkey = ""
